@@ -5,24 +5,26 @@ Captures all incoming messages to SQLite. No processing, no responses.
 
 import asyncio
 import logging
-import signal
+import os
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 
+from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import (
+    AuthKeyUnregisteredError,
     FloodWaitError,
     SessionPasswordNeededError,
-    AuthKeyUnregisteredError,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
-API_ID = 30822732
-API_HASH = "6b93513ce93fd0860587bed4cd52e41b"        # ← your api_hash from my.telegram.org
-SESSION_NAME = "userbot"
-DB_PATH = "messages.db"
-LOG_PATH = "listener.log"
+load_dotenv()
+
+API_ID       = int(os.getenv("API_ID"))
+API_HASH     = os.getenv("API_HASH")
+SESSION_NAME = os.getenv("SESSION_NAME", "userbot")
+DB_PATH      = os.getenv("DB_PATH", "messages.db")
+LOG_PATH     = os.getenv("LOG_PATH", "listener.log")
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -30,7 +32,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(LOG_PATH),
-        logging.StreamHandler(),          # also prints to terminal
+        logging.StreamHandler(),
     ],
 )
 log = logging.getLogger(__name__)
@@ -63,11 +65,11 @@ def log_message(conn: sqlite3.Connection, event) -> None:
     msg = event.message
     now = datetime.utcnow().isoformat()
 
-    chat_id = event.chat_id
+    chat_id   = event.chat_id
     chat_name = getattr(event.chat, "title", None) or getattr(event.chat, "first_name", None)
     sender_id = msg.sender_id
-    sender = getattr(msg.sender, "first_name", None) or getattr(msg.sender, "username", None)
-    content = msg.text or ""
+    sender    = getattr(msg.sender, "first_name", None) or getattr(msg.sender, "username", None)
+    content   = msg.text or ""
     is_outgoing = int(msg.out)
 
     conn.execute("""
@@ -84,9 +86,7 @@ def log_message(conn: sqlite3.Connection, event) -> None:
 # ── Client setup ──────────────────────────────────────────────────────────────
 async def start_client(session: str) -> TelegramClient:
     client = TelegramClient(session, API_ID, API_HASH)
-
-    await client.start()          # handles login / 2FA interactively on first run
-
+    await client.start()
     me = await client.get_me()
     log.info(f"Logged in as {me.first_name} (id={me.id})")
     return client
@@ -94,7 +94,7 @@ async def start_client(session: str) -> TelegramClient:
 
 # ── Reconnect loop ────────────────────────────────────────────────────────────
 async def run_with_reconnect(conn: sqlite3.Connection) -> None:
-    backoff = 5  # seconds, doubles on each failure up to 5 min
+    backoff = 5
 
     while True:
         try:
@@ -103,7 +103,6 @@ async def run_with_reconnect(conn: sqlite3.Connection) -> None:
             @client.on(events.NewMessage)
             async def handler(event):
                 try:
-                    # Pre-fetch sender so we have their name
                     await event.message.get_sender()
                     await event.message.get_chat()
                     log_message(conn, event)
@@ -114,12 +113,12 @@ async def run_with_reconnect(conn: sqlite3.Connection) -> None:
                     log.error(f"Handler error: {exc}")
 
             log.info("Listener running. Ctrl-C to stop.")
-            backoff = 5          # reset on successful connect
+            backoff = 5
             await client.run_until_disconnected()
 
         except AuthKeyUnregisteredError:
-            log.error("Session revoked by Telegram. Delete userbot.session and re-run.")
-            break                # no point retrying — need fresh auth
+            log.error("Session revoked. Delete userbot.session and re-run.")
+            break
 
         except SessionPasswordNeededError:
             log.error("2FA password required but not provided.")
@@ -134,24 +133,13 @@ async def run_with_reconnect(conn: sqlite3.Connection) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 async def main():
     conn = init_db(DB_PATH)
-
-    # Graceful shutdown on Ctrl-C / SIGTERM
-    loop = asyncio.get_running_loop()
-    stop = loop.create_future()
-
-    def _shutdown():
+    try:
+        await run_with_reconnect(conn)
+    except KeyboardInterrupt:
         log.info("Shutdown signal received.")
-        stop.set_result(None)
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _shutdown)
-
-    listener = asyncio.create_task(run_with_reconnect(conn))
-    await asyncio.wait([listener, asyncio.ensure_future(stop)],
-                       return_when=asyncio.FIRST_COMPLETED)
-    listener.cancel()
-    conn.close()
-    log.info("Shutdown complete.")
+    finally:
+        conn.close()
+        log.info("Shutdown complete.")
 
 
 if __name__ == "__main__":
