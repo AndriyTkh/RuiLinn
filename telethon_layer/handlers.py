@@ -219,14 +219,9 @@ class TelethonHandlers:
             if chat_id is None:
                 return
 
-            # typing status
-            if event.typing:
-                action = getattr(event, "action", None)
-                if isinstance(action, SendMessageTypingAction):
-                    self._batcher.on_typing_started(chat_id)
-                else:
-                    # any typing action cleared = stopped
-                    self._batcher.on_typing_stopped(chat_id)
+            action = getattr(event, "action", None)
+            if isinstance(action, SendMessageTypingAction):
+                self._batcher.on_typing(chat_id)
                 return
 
             # presence (online / offline)

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 import actions.actions as actions
 from classifier.classifier import classify_batch
@@ -43,9 +44,16 @@ log = logging.getLogger(__name__)
 # ── Batch Pipeline ─────────────────────────────────────────────────────────────
 
 async def handle_batch(batch: dict) -> None:
-    chat_id = batch["chat_id"]
+    chat_id   = batch["chat_id"]
+    chat_name = batch.get("chat_name", str(chat_id))
+    t0        = time.monotonic()
+
+    def _step(n: int, label: str) -> None:
+        elapsed = time.monotonic() - t0
+        log.info(f"── STEP {n} [{chat_name}] {label} (+{elapsed:.2f}s)")
 
     # 1. Classify
+    _step(1, "classify")
     classifier_result = await classify_batch(batch)
     if classifier_result is None:
         log.warning("── CLASSIFIER ── no result")
@@ -54,22 +62,24 @@ async def handle_batch(batch: dict) -> None:
     log.info(f"── CLASSIFIER ── {json.dumps(classifier_result, ensure_ascii=False)}")
 
     # 2. Persist batch + result for conversation history
+    _step(2, "log batch")
     log_batch(db_conn, batch, classifier_result, direction="in")
 
     if not classifier_result["response_expected"]:
+        log.info(f"── DONE [{chat_name}] no response needed (+{time.monotonic()-t0:.2f}s)")
         return
 
     response_type = classifier_result["response_type"]
 
     # react-only: skip thinker, go straight to actions
     if response_type == "react":
-        # no message_id in batch context — reaction target is last message
         last_msg_id = batch["messages"][-1].get("message_id")
         if last_msg_id:
             await actions.do_react(chat_id, last_msg_id, "❤️")
         return
 
     # 3. Build context
+    _step(3, "build context")
     context_package = ctx_builder.build_context(batch, classifier_result)
 
     # 3a. If conversation was cold, run retrospective on the previous session in background
@@ -77,6 +87,7 @@ async def handle_batch(batch: dict) -> None:
         asyncio.create_task(planner.run_retrospective(chat_id))
 
     # 4. Think
+    _step(4, "think")
     thinker_result = await thinker.think(context_package)
     if thinker_result is None:
         log.warning("── THINKER ── no result")
@@ -91,10 +102,12 @@ async def handle_batch(batch: dict) -> None:
             await actions.do_react(chat_id, last_msg_id, thinker_result["reaction"])
 
     # 6. Send messages
+    _step(5, "send")
     reply_to_id = batch["messages"][-1].get("message_id")
     await actions.send_batch(chat_id, thinker_result["messages"], reply_to_id=reply_to_id)
 
     # 7. Persist outgoing batch for history
+    _step(6, "log outgoing")
     outgoing_batch = {
         "chat_id":    chat_id,
         "chat_name":  batch.get("chat_name"),
@@ -106,6 +119,7 @@ async def handle_batch(batch: dict) -> None:
         ],
     }
     log_batch(db_conn, outgoing_batch, direction="out")
+    log.info(f"── DONE [{chat_name}] (+{time.monotonic()-t0:.2f}s)")
 
 
 # ── Startup ────────────────────────────────────────────────────────────────────
