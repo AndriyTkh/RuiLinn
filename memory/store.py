@@ -199,12 +199,18 @@ class MemoryStore:
 
     def get_pending_intents(self, chat_id: int) -> list[dict]:
         rows = self._db.execute(
-            "SELECT id, intent, created_at FROM pending_intents WHERE chat_id = ? AND resolved = 0 ORDER BY created_at",
+            "SELECT id, intent, created_at FROM pending_intents"
+            " WHERE chat_id = ? AND resolved = 0 ORDER BY created_at DESC LIMIT 3",
             (chat_id,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return list(reversed([dict(r) for r in rows]))
 
     def set_pending_intent(self, chat_id: int, intent: str) -> None:
+        # new commitment supersedes all previous ones
+        self._db.execute(
+            "UPDATE pending_intents SET resolved = 1 WHERE chat_id = ? AND resolved = 0",
+            (chat_id,),
+        )
         self._db.execute(
             "INSERT INTO pending_intents (chat_id, intent, created_at) VALUES (?, ?, ?)",
             (chat_id, intent, _NOW()),

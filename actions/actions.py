@@ -69,7 +69,7 @@ def _classify_output(messages: list[str]) -> str:
 
 def _typing_delay(text: str) -> float:
     chars = len(text)
-    base  = chars * 0.045  # ~45ms per char
+    base  = chars * 0.08  # ~80ms per char
     variance = random.uniform(-0.3, 0.3)
     return max(1.0, min(8.0, base + variance))
 

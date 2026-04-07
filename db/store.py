@@ -135,6 +135,70 @@ def init_db(path: str) -> sqlite3.Connection:
             created_at TEXT    NOT NULL,
             updated_at TEXT    NOT NULL
         );
+
+        -- Knowledge: topics Rui knows about, with source, confidence, opinion, gaps
+        CREATE TABLE IF NOT EXISTS knowledge (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic       TEXT    NOT NULL UNIQUE,
+            content     TEXT    NOT NULL,
+            source      TEXT,
+            confidence  REAL    DEFAULT 0.6,
+            opinion     TEXT,
+            gaps        TEXT    DEFAULT '[]',  -- JSON array
+            created_at  TEXT    NOT NULL,
+            updated_at  TEXT    NOT NULL
+        );
+
+        -- Skills: things Rui can do, with proficiency and personal backstory
+        CREATE TABLE IF NOT EXISTS skills (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT    NOT NULL UNIQUE,
+            proficiency REAL    DEFAULT 0.3,
+            backstory   TEXT,
+            created_at  TEXT    NOT NULL,
+            updated_at  TEXT    NOT NULL
+        );
+
+        -- Self identity (single row): narrative, purpose, preferences, questions
+        CREATE TABLE IF NOT EXISTS self_identity (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            narrative   TEXT,
+            purpose     TEXT,
+            preferences TEXT DEFAULT '[]',  -- JSON array
+            questions   TEXT DEFAULT '[]',  -- JSON array
+            updated_at  TEXT NOT NULL
+        );
+
+        -- How much each person matters to the agent
+        CREATE TABLE IF NOT EXISTS person_significance (
+            person_id   INTEGER PRIMARY KEY,
+            level       REAL    DEFAULT 0.3,
+            why         TEXT    DEFAULT '',
+            updated_at  TEXT    NOT NULL
+        );
+
+        -- Controlling Unit: operator flags (behavioral alerts sent to operator)
+        CREATE TABLE IF NOT EXISTS operator_flags (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            reason      TEXT    NOT NULL,
+            evidence    TEXT,
+            chat_id     INTEGER,
+            severity    TEXT    DEFAULT 'warning',  -- info | warning | critical
+            sent        INTEGER DEFAULT 0,
+            created_at  TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_opflag_time ON operator_flags(created_at);
+
+        -- Controlling Unit: prompt edit history
+        CREATE TABLE IF NOT EXISTS prompt_edits (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     INTEGER,  -- null = global
+            current     TEXT,
+            proposed    TEXT NOT NULL,
+            decision    TEXT    DEFAULT 'pending',  -- pending | applied | rejected
+            reason      TEXT,
+            created_at  TEXT    NOT NULL
+        );
     """)
     conn.commit()
     log.info(f"Database ready at {path}")

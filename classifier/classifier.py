@@ -81,10 +81,11 @@ def _build_user_content(batch: dict) -> str:
     return "\n".join(lines)
 
 
-async def classify_batch(batch: dict) -> dict | None:
+async def classify_batch(batch: dict, verifier_flags: dict | None = None) -> dict | None:
     """
     Classify a flushed batch. Returns parsed dict or None on failure.
     Caller should check result["response_expected"] before forwarding to thinker.
+    verifier_flags: optional output from Verifier.verdict() to inject as context.
     """
     # short-circuit: media_only if all messages are non-text with no content
     all_media = all(
@@ -92,20 +93,31 @@ async def classify_batch(batch: dict) -> dict | None:
         for m in batch["messages"]
     )
     if all_media:
-        return {
+        result = {
             "user_finished":     True,
             "response_expected": True,
             "response_type":     "react",
             "confidence":        1.0,
             "flags": {
+                "verifier":       (verifier_flags or {}).get("verdict", "pass"),
                 "multi_question": False,
                 "topic_shift":    False,
                 "media_only":     True,
                 "incomplete":     False,
             },
         }
+        return result
 
     user_content = _build_user_content(batch)
+
+    # Prepend verifier context to user content when a flag was raised
+    if verifier_flags and verifier_flags.get("verdict") != "pass":
+        verdict      = verifier_flags["verdict"]
+        tone         = verifier_flags.get("suggested_tone", "normal")
+        user_content = (
+            f"[VERIFIER FLAG: {verdict} — suggested tone: {tone}]\n\n"
+            + user_content
+        )
     payload = {
         "model":           _MODEL,
         "temperature":     0.0,
@@ -130,7 +142,7 @@ async def classify_batch(batch: dict) -> dict | None:
             # strip markdown fences if model wraps output despite json_object mode
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL)
             result = json.loads(cleaned)
-            return _fill_defaults(result)
+            return _fill_defaults(result, verifier_flags)
 
     except json.JSONDecodeError:
         log.error(f"Classifier non-JSON: {raw!r}")
@@ -140,7 +152,7 @@ async def classify_batch(batch: dict) -> dict | None:
     return None
 
 
-def _fill_defaults(result: dict) -> dict:
+def _fill_defaults(result: dict, verifier_flags: dict | None = None) -> dict:
     """Fill missing fields with safe defaults instead of hard-failing."""
     result.setdefault("user_finished", True)
     result.setdefault("response_expected", True)
@@ -152,6 +164,7 @@ def _fill_defaults(result: dict) -> dict:
         result["response_type"] = "reply"
 
     flags = result.setdefault("flags", {})
+    flags["verifier"] = (verifier_flags or {}).get("verdict", "pass")
     flags.setdefault("multi_question", False)
     flags.setdefault("topic_shift", False)
     flags.setdefault("media_only", False)

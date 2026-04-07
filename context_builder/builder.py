@@ -48,6 +48,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from db.store import fetch_recent_batches
+from knowledge.store import KnowledgeStore
 from memory.store import MemoryStore
 
 log = logging.getLogger(__name__)
@@ -57,9 +58,10 @@ _GAP_RESUMING = 24 * 60 * 60     # < 24 hrs
 
 
 class ContextBuilder:
-    def __init__(self, db_conn: sqlite3.Connection, memory: MemoryStore):
-        self._db     = db_conn
-        self._memory = memory
+    def __init__(self, db_conn: sqlite3.Connection, memory: MemoryStore, knowledge: KnowledgeStore | None = None):
+        self._db        = db_conn
+        self._memory    = memory
+        self._knowledge = knowledge
 
         # Event buffers — handlers write here, context builder reads + clears
         self._edits:     dict[int, list[dict]] = {}
@@ -102,6 +104,7 @@ class ContextBuilder:
                 "last_summary": summary,
             },
             "relationship":  self._memory.get_relationship(person_id, chat_id),
+            "knowledge":     self._knowledge.get_context(batch) if self._knowledge else {"knowledge": [], "skills": []},
             "timing":        timing,
             "agent": {
                 "last_output":     self._get_agent_last_output(chat_id, history),
@@ -216,3 +219,18 @@ class ContextBuilder:
 
     def set_pending_intent(self, chat_id: int, intent: str) -> None:
         self._memory.set_pending_intent(chat_id, intent)
+
+    def write_knowledge(
+        self,
+        topic:      str,
+        content:    str,
+        source:     str   = "conversation",
+        confidence: float = 0.6,
+        opinion:    str   | None = None,
+    ) -> None:
+        if self._knowledge:
+            existing = self._knowledge.get_knowledge(topic)
+            if existing:
+                self._knowledge.update_knowledge(topic, content=content, confidence=confidence, opinion=opinion)
+            else:
+                self._knowledge.add_knowledge(topic, content, source, confidence, opinion)

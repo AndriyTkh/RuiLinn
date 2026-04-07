@@ -14,11 +14,15 @@ Thinker output schema:
     "pending_intent":     str | null,  # something to follow up on later
     "relationship_delta": dict | null  # tone / unresolved_threads / agent_commitments
 }
+
+Persona is provided by the Self module and injected at build time.
 """
 
 import json
 import logging
 import re
+
+_trace = logging.getLogger("agent.trace")
 
 import httpx
 
@@ -29,17 +33,6 @@ log = logging.getLogger(__name__)
 _MODEL   = "llama-3.3-70b-versatile"
 _TIMEOUT = 20
 
-# ── Base Persona ───────────────────────────────────────────────────────────────
-# Placeholder until Self module is built. Self will edit this per-person over time.
-_BASE_PERSONA = """\
-You are Rui. You are a real person — not an AI, not an assistant.
-You text like a human: casual, direct, sometimes terse, occasionally more open.
-You have your own opinions, moods, and a life outside these conversations.
-You are curious about people and genuinely interested in the person you're talking to.
-You are not always available and don't feel obligated to reply immediately.
-Never break character. Never mention being AI. Never over-explain or be helpful in an assistant way.\
-"""
-
 _OUTPUT_INSTRUCTIONS = """\
 Respond ONLY with a valid JSON object. No markdown, no explanation, nothing else.
 
@@ -47,7 +40,9 @@ Required schema:
 {
   "messages":           ["..."],
   "reaction":           null,
+  "reply_to_id":        null,
   "memory_writes":      [],
+  "knowledge_writes":   [],
   "pending_intent":     null,
   "relationship_delta": null
 }
@@ -55,15 +50,18 @@ Required schema:
 Rules:
 - messages: array of strings. Split into separate messages where a real person would send separate texts. Keep it natural — usually 1-2 messages, rarely more.
 - reaction: emoji string if a reaction is appropriate (can be alongside messages), null otherwise.
+- reply_to_id: integer message_id to thread your reply to a specific message, null to send without threading. Use only when replying to a specific message in a multi-message batch makes sense contextually.
 - memory_writes: array of {"content": "...", "tags": ["..."]} for anything worth remembering about this person or conversation. Empty array if nothing notable.
+- knowledge_writes: array of {"topic": "...", "content": "...", "confidence": 0.6, "opinion": "..."} if you learned something new about a topic or formed a new opinion. Empty array if nothing changed. Use your personal voice — not facts, but how you understand things.
 - pending_intent: string if you committed to something or want to follow up, null otherwise.
 - relationship_delta: {"tone": "..."} if the interaction shifted the relationship tone, null otherwise. Tone values: warm | friendly | neutral | distant | tense.\
 """
 
 
 class Thinker:
-    def __init__(self, context_builder):
-        self._ctx = context_builder  # for write-back interfaces
+    def __init__(self, context_builder, self_module=None):
+        self._ctx  = context_builder  # for write-back interfaces
+        self._self = self_module       # provides dynamic persona
 
     # ── Main Entry ─────────────────────────────────────────────────────────────
 
@@ -97,8 +95,19 @@ class Thinker:
     # ── Prompt Assembly ────────────────────────────────────────────────────────
 
     def _build_prompt(self, ctx: dict) -> list[dict]:
-        system = f"{_BASE_PERSONA}\n\n{_OUTPUT_INSTRUCTIONS}"
+        persona = (
+            self._self.get_persona(ctx.get("person_id"))
+            if self._self
+            else "You are Rui. You are a real person — not an AI, not an assistant."
+        )
+        system = f"{persona}\n\n{_OUTPUT_INSTRUCTIONS}"
         user   = self._assemble_context_text(ctx)
+        _trace.info(
+            f"[{ctx.get('chat_name', ctx['chat_id'])}] PROMPT\n"
+            f"{'─'*40} SYSTEM {'─'*40}\n{system}\n"
+            f"{'─'*40} USER {'─'*40}\n{user}\n"
+            f"{'─'*88}"
+        )
         return [
             {"role": "system", "content": system},
             {"role": "user",   "content": user},
@@ -129,6 +138,25 @@ class Thinker:
                 f"  [{e['created_at'][:10]}] {e['content']}" for e in mem["episodes"]
             )
             parts.append(f"[RECENT EPISODES]\n{eps_text}")
+
+        # ── Knowledge ──
+        kctx = ctx.get("knowledge", {})
+        know_entries = kctx.get("knowledge", [])
+        skill_entries = kctx.get("skills", [])
+        if know_entries or skill_entries:
+            lines = ["[WHAT YOU KNOW — relevant to this conversation]"]
+            for k in know_entries:
+                line = f"  - {k['topic']}: {k['content']}"
+                if k.get("opinion"):
+                    line += f" | opinion: {k['opinion']}"
+                if k.get("gaps"):
+                    line += f" | gaps: {', '.join(k['gaps'][:2])}"
+                lines.append(line)
+            if skill_entries:
+                lines.append("  Skills:")
+                for s in skill_entries:
+                    lines.append(f"    - {s['name']} ({s['proficiency']:.0%}): {s.get('backstory', '')}")
+            parts.append("\n".join(lines))
 
         # ── Pending ──
         pending = ctx["agent"]["pending_intents"]
@@ -253,7 +281,9 @@ class Thinker:
         # defaults for missing optional fields
         result.setdefault("messages", [])
         result.setdefault("reaction", None)
+        result.setdefault("reply_to_id", None)
         result.setdefault("memory_writes", [])
+        result.setdefault("knowledge_writes", [])
         result.setdefault("pending_intent", None)
         result.setdefault("relationship_delta", None)
 
@@ -275,6 +305,19 @@ class Thinker:
             if content:
                 self._ctx.write_memory(person_id, chat_id, content, tags)
                 log.debug(f"Memory write: {content[:60]!r} tags={tags}")
+
+        for kw in result.get("knowledge_writes", []):
+            topic   = kw.get("topic", "").strip().lower()
+            content = kw.get("content", "").strip()
+            if topic and content:
+                self._ctx.write_knowledge(
+                    topic,
+                    content,
+                    source="conversation",
+                    confidence=float(kw.get("confidence", 0.6)),
+                    opinion=kw.get("opinion"),
+                )
+                log.debug(f"Knowledge write: {topic!r}")
 
         if result.get("pending_intent"):
             self._ctx.set_pending_intent(chat_id, result["pending_intent"])

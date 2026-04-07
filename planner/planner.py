@@ -39,9 +39,10 @@ _EVENING_HOUR = 22  # UTC hour to run evening routine
 
 
 class Planner:
-    def __init__(self, db_conn, memory: MemoryStore):
+    def __init__(self, db_conn, memory: MemoryStore, self_module=None):
         self._db     = db_conn
         self._memory = memory
+        self._self   = self_module
 
     # ── Retrospective ──────────────────────────────────────────────────────────
 
@@ -97,12 +98,15 @@ class Planner:
                 {"tone": result["relationship_tone"]},
             )
 
-        # Write to self-memory if significant
-        if result.get("significant"):
+        # Notify Self if significant (Self writes to self-memory internally)
+        if result.get("significant") and self._self:
             summary_preview = result.get("summary", "")[:120]
-            self._memory.write_self_memory(
-                f"Notable conversation [{chat_id}]: {summary_preview}",
-                event_type="significant_conversation",
+            asyncio.create_task(
+                self._self.flag_self_event(
+                    "significant_conversation",
+                    f"Conversation [{chat_id}]: {summary_preview}",
+                    person_id=person_id,
+                )
             )
 
         # Update mood based on how the interaction went

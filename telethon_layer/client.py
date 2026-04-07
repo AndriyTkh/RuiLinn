@@ -41,7 +41,10 @@ async def run_with_reconnect(
             await on_ready(client, me)
             log.info("Listening. Ctrl-C to stop.")
             backoff = 5
-            await client.run_until_disconnected()
+            try:
+                await client.run_until_disconnected()
+            except asyncio.CancelledError:
+                log.warning("Connection dropped (CancelledError).")
 
         except AuthKeyUnregisteredError:
             log.error("Session revoked. Delete the .session file and re-run.")
@@ -49,6 +52,10 @@ async def run_with_reconnect(
 
         except SessionPasswordNeededError:
             log.error("2FA password required but not provided.")
+            break
+
+        except EOFError:
+            log.error("No session file found and stdin is not interactive. Run once manually to authenticate.")
             break
 
         except KeyboardInterrupt:
